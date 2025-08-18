@@ -1,0 +1,33 @@
+services:
+  db:
+    image: postgres:16.9
+    container_name: postgres_db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - '${POSTGRES_PORT}:${POSTGRES_PORT}'
+    restart: unless-stopped
+    command: [ "postgres", "-c", "max_connections=400", "-c", "shared_buffers=256MB" ]
+
+  tracker:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: tracker_app
+    environment:
+      - DEBUG=True
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:${POSTGRES_PORT}/${POSTGRES_DB}
+      - PRIVATE_KEY=${PRIVATE_KEY}
+      - MARGIN_MODULE_ADDRESS=${MARGIN_MODULE_ADDRESS}
+      - HTTP_RPC_URL=${HTTP_RPC_URL}
+    volumes:
+      - ./volumes/app/logs:/app/logs
+    depends_on:
+      - db
+
+volumes:
+  postgres-data:

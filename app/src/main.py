@@ -38,7 +38,7 @@ async def main():
         )
         listener = CombinedListener(log_provider, processors, session)
         liquidator = LiquidatorService(w3, session)
-        asyncio.create_task(liquidator.init_skip_positions())
+        await liquidator.init_skip_positions()
 
         # Start the liquidator service
         async def worker():

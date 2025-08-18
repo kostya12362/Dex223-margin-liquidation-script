@@ -52,5 +52,8 @@ docker compose -f docker-compose.yml down -v
 ```
 And run command `1.3`
 
+<br>
+Added liquidation tracker draft by @kostya12362
+
 
 

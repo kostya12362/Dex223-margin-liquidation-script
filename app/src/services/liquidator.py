@@ -104,7 +104,7 @@ class LiquidatorService:
     def to_liquidate(self, block: BlockData) -> Iterable[int]:
         to_process = copy.copy(self.frozen_positions)
         if not to_process:
-            logger.debug("No frozen positions to liquidate")
+            logger.debug(f"No frozen positions to liquidate block {block['number']}")
             return
 
         # we copy so as not to mutate during iterations

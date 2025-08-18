@@ -1,5 +1,7 @@
 import asyncio
-from web3 import AsyncWeb3, AsyncHTTPProvider
+from loguru import logger
+from web3 import AsyncWeb3
+
 from config import settings
 from core.db import get_session
 from services.block_poller import BlockPoller
@@ -44,20 +46,33 @@ async def main():
         async def worker():
             while True:
                 block = await queue.get()
-                await asyncio.gather(
-                    *[
-                        liquidator.frozen(position_id, block)
-                        async for position_id in listener.handle_block(block)
-                    ]
-                )
-                await asyncio.gather(
-                    *[
-                        liquidator.liquidate(position_id, block)
-                        for position_id in liquidator.to_liquidate(block)
-                    ]
-                )
+                try:
+                    while True:
+                        try:
+                            position_ids = [pid async for pid in listener.handle_block(block)]
+                            break
+                        except Exception as e:
+                            logger.exception(f"handle_block failed on {block['number']}, will retry {e}")
+                            await asyncio.sleep(1.0)
 
-                queue.task_done()
+                    freeze_results = await asyncio.gather(
+                        *(liquidator.frozen(pid, block) for pid in position_ids),
+                        return_exceptions=True,
+                    )
+                    for r in freeze_results:
+                        if isinstance(r, Exception):
+                            logger.warning(f"freeze task error: {r!r}")
+
+                    liq_results = await asyncio.gather(
+                        *(liquidator.liquidate(pid, block) for pid in liquidator.to_liquidate(block)),
+                        return_exceptions=True,
+                    )
+                    for r in liq_results:
+                        if isinstance(r, Exception):
+                            logger.warning(f"liquidate task error: {r!r}")
+
+                finally:
+                    queue.task_done()
 
         await asyncio.gather(
             poller.run(),

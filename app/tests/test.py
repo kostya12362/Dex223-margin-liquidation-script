@@ -48,8 +48,8 @@ margin_module = w3.eth.contract(
 
 fake = Faker()
 # GROUPS_IDS = [1, 2, 3, 15]  # Groups to be created or used in tests
-GROUPS_IDS = [1, 2]
-BULK_GROUPS_IDS = [16]
+GROUPS_IDS = [5, 6]
+BULK_GROUPS_IDS = [17]
 
 
 class TokenParams:
@@ -140,9 +140,8 @@ async def test_position_for_liquidation():
         tg = await utility_module_cfg2.functions.test_group(group_id).call()
         logger.info(f"Test group {group_id} data: {tg}")
         position_id = tg[3]  # token0, token1, orderId, positionId, last_step
-        fee_tiers = settings.FEE_TIERS
         await asyncio.sleep(10)  # wait for the next block to ensure liquidation check
-        subject, liquidator, frozen_timestamp, liquidated = await margin_module.functions.subjectToLiquidationExtended(position_id, fee_tiers).call()
+        subject, liquidator, frozen_timestamp, liquidated = await margin_module.functions.subjectToLiquidationExtended(position_id).call()
         logger.info(
             f"Position ID: {position_id} | Group ID: {group_id} | "
             f"subjectToLiquidationExtended: {subject}"

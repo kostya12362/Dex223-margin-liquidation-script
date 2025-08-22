@@ -16,6 +16,7 @@ alembic = "^1.15.2"
 web3 = "^7.11.0"
 pydantic-settings = "^2.9.1"
 httpx = "^0.28.1"
+faker = "^37.5.3"
 
 
 [tool.poetry.group.dev.dependencies]

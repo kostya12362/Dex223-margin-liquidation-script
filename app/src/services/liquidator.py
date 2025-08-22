@@ -55,9 +55,10 @@ class LiquidatorService:
             ).call()
             logger.debug(
                 f'subjectToLiquidationExtended status: {status},'
-                f' liquidator: {liquidator},'
-                f' frozen_ts: {frozen_ts},'
-                f' position_id: {position_id}'
+                f'liquidator: {liquidator}, '
+                f'frozen_ts: {frozen_ts}, '
+                f'liquidated: {liquidated}, '
+                f'position_id: {position_id}'
             )
         except ContractLogicError as e:
             logger.error(f"subjectToLiquidationExtended reverted for {position_id}: {e}")
@@ -75,6 +76,10 @@ class LiquidatorService:
             return
 
         subject = await self.check_positions(position_id)
+        if subject.liquidated is True:
+            logger.info(f"Position {position_id} already liquidated at block {block['number']}")
+            await self.repo_pos.set_liquidated(position_id)
+            return
         if subject.status is False or subject.liquidator is not None:
             logger.info(f"Position {position_id} not eligible at block {block['number']}")
             return
@@ -119,7 +124,7 @@ class LiquidatorService:
             del self.frozen_positions[position_id]
             subject = await self.check_positions(position_id)
             # we check that we are the liquidator
-            if subject.status is True and subject.liquidator == self.liquidate_address:
+            if subject.status is True and subject.liquidator == self.liquidate_address and subject.liquidated is False:
                 tx_hash = await self._send_liquidate_tx(position_id)
                 logger.info(f"Sent liquidation tx {tx_hash.to_0x_hex()} for {position_id}")
                 await self.repo_pos.set_liquidated(position_id)

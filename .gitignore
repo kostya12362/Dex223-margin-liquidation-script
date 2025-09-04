@@ -183,3 +183,4 @@ crawler/proxies.txt
 /app/logs
 /app/.env
 /app/venv
+/app/src/check.py

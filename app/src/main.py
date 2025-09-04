@@ -1,20 +1,25 @@
 import asyncio
-from loguru import logger
 from web3 import AsyncWeb3
+from web3.middleware import ExtraDataToPOAMiddleware
+from loguru import logger
 
 from config import settings
-from core.db import get_session
-from services.block_poller import BlockPoller
-from services.event_listeners import (
-    AssetEventProcessor,
-    PoolEventProcessor,
-    CombinedLogProvider,
-    CombinedListener
-)
-from services.liquidator import LiquidatorService
-from web3.middleware import ExtraDataToPOAMiddleware
 from core.logger import setup_logger
 from core.retrying_provider import RetryingHTTPProvider
+from core.utils.w3 import load_abi
+from core.contracts import MarginModuleClient
+from core.topics import TopicsRegistry
+from core.db import SessionFactory
+
+from services.block_poller import BlockPoller
+from services.positions import PositionService
+from services.pools import PoolService
+from services.event_orchestrator import EventOrchestrator
+from services.liquidator import LiquidatorService
+from services.startup_initializer import StartupInitializer
+
+ASSET_EVENTS = ["NewAsset", "AssetRemoved"]
+POOL_EVENTS = ["Initialize", "Swap", "Mint", "Burn", "Collect"]
 
 setup_logger()
 
@@ -23,61 +28,65 @@ async def main():
     provider = RetryingHTTPProvider(settings.HTTP_RPC_URL)
     w3 = AsyncWeb3(provider)
     w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+
+    mm_abi = load_abi(settings.ABI_PATH / "margin_module.json")
+    pool_abi = load_abi(settings.ABI_PATH / "pool.json")
+    mm = MarginModuleClient(w3, settings.MARGIN_MODULE_ADDRESS, mm_abi)
+
+    topics = TopicsRegistry(mm_abi=mm_abi, pool_abi=pool_abi, asset_events=ASSET_EVENTS, pool_events=POOL_EVENTS)
+
     queue: asyncio.Queue = asyncio.Queue()
     poller = BlockPoller(w3, queue)
 
-    async for session in get_session():
-        # Make processors for events
-        processors = [
-            AssetEventProcessor(w3, session),
-            PoolEventProcessor(session),
-        ]
-        # General log provider that combines multiple processors
-        log_provider = CombinedLogProvider(
-            w3,
-            session,
-            processors
-        )
-        listener = CombinedListener(log_provider, processors, session)
-        liquidator = LiquidatorService(w3, session)
-        await liquidator.init_skip_positions()
+    # services receive a session factory and open a session for each call
+    pos_service = PositionService(SessionFactory, mm)
+    pool_service = PoolService(SessionFactory)
 
-        # Start the liquidator service
-        async def worker():
-            while True:
-                block = await queue.get()
-                try:
-                    while True:
-                        try:
-                            position_ids = [pid async for pid in listener.handle_block(block)]
-                            break
-                        except Exception as e:
-                            logger.exception(f"handle_block failed on {block['number']}, will retry {e}")
-                            await asyncio.sleep(1.0)
+    orchestrator = EventOrchestrator(
+        w3=w3, topics=topics, mm=mm, positions=pos_service, pools=pool_service
+    )
+    liquidator = LiquidatorService(w3=w3, mm=mm, session_factory=SessionFactory)
 
-                    freeze_results = await asyncio.gather(
-                        *(liquidator.frozen(pid, block) for pid in position_ids),
-                        return_exceptions=True,
-                    )
-                    for r in freeze_results:
-                        if isinstance(r, Exception):
-                            logger.warning(f"freeze task error: {r!r}")
+    # Initialization of all positions
+    initializer = StartupInitializer(
+        mm=mm,
+        session_factory=SessionFactory,
+        pos_service=pos_service,
+        liquidator=liquidator,
+        concurrency=8
+    )
+    await initializer.run()
 
-                    liq_results = await asyncio.gather(
-                        *(liquidator.liquidate(pid, block) for pid in liquidator.to_liquidate(block)),
-                        return_exceptions=True,
-                    )
-                    for r in liq_results:
-                        if isinstance(r, Exception):
-                            logger.warning(f"liquidate task error: {r!r}")
+    async def worker():
+        while True:
+            block = await queue.get()
+            try:
+                # on-chain part with retracements
+                while True:
+                    try:
+                        ids = [pid async for pid in orchestrator.handle_block(block)]
+                        break
+                    except Exception as e:
+                        logger.exception(f"handle_block failed on {block['number']}: {e}")
+                        await asyncio.sleep(1.0)
 
-                finally:
-                    queue.task_done()
+                # parallel: each call has its own session/connection
+                fr = await asyncio.gather(*(liquidator.frozen(pid, block) for pid in ids), return_exceptions=True)
+                for r in fr:
+                    if isinstance(r, Exception):
+                        logger.warning(f"freeze task error: {r!r}")
 
-        await asyncio.gather(
-            poller.run(),
-            worker(),
-        )
+                liq = await asyncio.gather(
+                    *(liquidator.liquidate(pid, block) for pid in liquidator.to_liquidate(block)),
+                    return_exceptions=True
+                )
+                for r in liq:
+                    if isinstance(r, Exception):
+                        logger.warning(f"liquidate task error: {r!r}")
+            finally:
+                queue.task_done()
+
+    await asyncio.gather(poller.run(), worker())
 
 
 if __name__ == "__main__":

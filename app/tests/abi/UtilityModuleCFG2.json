@@ -70,6 +70,24 @@
     "type": "function"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "_groupId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "_groupId2",
+        "type": "uint256"
+      }
+    ],
+    "name": "inheritGroup",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
     "inputs": [],
     "name": "liq_token",
     "outputs": [
@@ -216,6 +234,24 @@
       }
     ],
     "name": "step1_MakeWhitelist",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "_groupId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "_interestRate",
+        "type": "uint256"
+      }
+    ],
+    "name": "step2_MakeCustomOrder",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
@@ -492,18 +528,10 @@
         "internalType": "uint256",
         "name": "last_step",
         "type": "uint256"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "tokenWlist",
-    "outputs": [
+      },
       {
         "internalType": "bytes32",
-        "name": "",
+        "name": "tokenWlist",
         "type": "bytes32"
       }
     ],

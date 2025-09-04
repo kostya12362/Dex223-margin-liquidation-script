@@ -59,12 +59,6 @@ class Position(Base):
     __tablename__ = 'positions'
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    frozen_by: Mapped[str | None] = mapped_column(
-        String(42),
-        nullable=True,
-        index=True,
-        comment="Address of the liquidator who froze the position"
-    )
     is_liquidated: Mapped[bool] = mapped_column(
         Boolean,
         nullable=True,
@@ -72,11 +66,11 @@ class Position(Base):
         index=True,
         comment="Indicates if the position has been liquidated"
     )
-    frozen_time: Mapped[datetime.datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
+    predict_check_timestamp: Mapped[BigInteger | None] = mapped_column(
+        BigInteger,
         index=True,
-        comment="Timestamp when the position was frozen by a liquidator"
+        default=None,
+        nullable=True
     )
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True),

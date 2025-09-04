@@ -3,20 +3,31 @@ import asyncio
 import json
 import pytest
 import pytest_asyncio
-from web3 import AsyncWeb3, Web3
+from web3 import Web3
 from web3.providers import AsyncHTTPProvider
 from eth_account import Account
 from faker import Faker
 from loguru import logger
-
+import math
+from typing import Any, Optional
+from web3 import AsyncWeb3
+from web3.exceptions import Web3RPCError
 from config import settings, ROOT_PATH
 from core.utils.w3 import ADDRESS_ZERO
 
+GAS_SAFETY = 1.15  # stock to estimate
+BLOCK_HEADROOM = 0.90  # no more than 90% of the block limit
+TIMEOUT = 240  # Sepolia is sometimes rare
+
+_nonce_lock = asyncio.Lock()
+_next_nonce: Optional[int] = None
+
 # === Configuration ===
+# RPC_URL = 'https://ethereum-sepolia.rpc.subquery.network/public'  # settings.HTTP_RPC_URL
 RPC_URL = settings.HTTP_RPC_URL
 PRIVATE_KEY = settings.PRIVATE_KEY
 MARGIN_MODULE_ADDRESS = settings.MARGIN_MODULE_ADDRESS
-UTILITY_MODULE_CFG2_ADDRESS = Web3.to_checksum_address("0x07f6AADD5934e74382758F47D792360C217215E6")
+UTILITY_MODULE_CFG2_ADDRESS = Web3.to_checksum_address("0x6D0e2CD13e1506924182d2197EE64D53CA8ba8a2")
 UTILITY_BULK_POSITION_CREATOR_ADDRESS = Web3.to_checksum_address("0x7543dc80AA7A5A87C5d08B1541b9ACd7F0D7fEd1")
 
 # === Setup AsyncWeb3 and Contracts ===
@@ -48,8 +59,9 @@ margin_module = w3.eth.contract(
 
 fake = Faker()
 # GROUPS_IDS = [1, 2, 3, 15]  # Groups to be created or used in tests
-GROUPS_IDS = [5, 6]
-BULK_GROUPS_IDS = [17]
+INDEX = 1
+GROUPS_IDS = [1003 + INDEX, 1004 + INDEX][0:1]  # Use only one group for tests to avoid concurrency issues
+BULK_GROUPS_IDS = [1051 + INDEX]
 
 
 class TokenParams:
@@ -61,34 +73,77 @@ class TokenParams:
         self.name, self.symbol, self.decimals = name, symbol, decimals
 
 
-_nonce_lock = asyncio.Lock()
-_next_nonce = None
+# _nonce_lock = asyncio.Lock()
+# _next_nonce = None
 
 
 # === Helper to send transactions ===
-async def send(txn_fn):
-    # txn_fn is a contract function call, e.g. util2.functions.step1_MakeWhitelist(0)
+async def _suggest_fees(w3: AsyncWeb3) -> dict[str, int]:
+    try:
+        fh = await w3.eth.fee_history(5, "latest", [10, 50, 90])
+        base = fh["baseFeePerGas"][-1]
+        rewards = [r for step in fh["reward"] for r in step] or [int(1.5e9)]
+        prio = max(int(sorted(rewards)[len(rewards) // 2]), int(1.5e9))  # >=1.5 gwei
+        return {"maxFeePerGas": int(base * 2 + prio), "maxPriorityFeePerGas": prio}
+    except Exception:
+        gp = await w3.eth.gas_price
+        return {"maxFeePerGas": int(gp * 2), "maxPriorityFeePerGas": int(gp)}
+
+
+async def _calc_gas_limit(txn_fn) -> int:
+    # gas assessment (without nonce/fees)
+    tx0 = await txn_fn.build_transaction({"from": acct.address})
+    try:
+        est = await w3.eth.estimate_gas(tx0)
+    except Web3RPCError as e:
+        if "exceeds block gas limit" in str(e).lower():
+            raise RuntimeError("Операция требует газа > лимита блока — разбей на несколько шагов") from e
+        raise
+    latest = await w3.eth.get_block("latest")
+    block_cap = int(latest["gasLimit"])
+    hard_cap = int(block_cap * BLOCK_HEADROOM)
+    gas_limit = min(max(est, math.ceil(est * GAS_SAFETY)), hard_cap)
+    return gas_limit
+
+
+async def send(txn_fn) -> dict[str, Any]:
     global _next_nonce
-    # только эту часть — под локом
+
+    # готовим параметры
+    gas_limit = await _calc_gas_limit(txn_fn)
+    fees = await _suggest_fees(w3)
+    chain_id = await w3.eth.chain_id
+
+    # reserve nonce, but increment it ONLY after a successful send
     async with _nonce_lock:
-        if _next_nonce is None:
-            _next_nonce = await w3.eth.get_transaction_count(acct.address, 'pending')
+        _next_nonce = await w3.eth.get_transaction_count(acct.address, "pending")
         nonce = _next_nonce
-        _next_nonce += 1
-        tx = await txn_fn.build_transaction({
-            'from': acct.address,
-            'nonce': nonce,
-            'gas': 30_000_000,
-            'gasPrice': await w3.eth.gas_price
-        })
-        signed = acct.sign_transaction(tx)
-        tx_hash = await w3.eth.send_raw_transaction(signed.raw_transaction)
-    receipt = await w3.eth.wait_for_transaction_receipt(tx_hash)
+
+    tx = await txn_fn.build_transaction({
+        "from": acct.address,
+        "nonce": nonce,
+        "gas": gas_limit,
+        "maxFeePerGas": fees["maxFeePerGas"],
+        "maxPriorityFeePerGas": fees["maxPriorityFeePerGas"],
+        "chainId": chain_id,
+        "type": 2,
+    })
+    signed = acct.sign_transaction(tx)
+    tx_hash = await w3.eth.send_raw_transaction(signed.raw_transaction)
+
+    # nonce увеличиваем только сейчас
+    async with _nonce_lock:
+        if _next_nonce == nonce:
+            _next_nonce += 1
+
+    # ждём включения
+    receipt = await w3.eth.wait_for_transaction_receipt(tx_hash, timeout=TIMEOUT)
+    if receipt["status"] != 1:
+        raise RuntimeError(f"Transaction failed: {txn_fn} | receipt={receipt}")
+
     logger.info(
         f"↳ {txn_fn}: https://sepolia.etherscan.io/tx/{receipt['transactionHash'].to_0x_hex()} | "
-        f"status={receipt['status']} | "
-        f"gasUsed={receipt['gasUsed']} | "
-        f"blockNumber={receipt['blockNumber']}"
+        f"status={receipt['status']} | gasUsed={receipt['gasUsed']} | block={receipt['blockNumber']}"
     )
     return receipt
 
@@ -108,7 +163,6 @@ async def setup_tokens():
         ))
         await send(utility_module_cfg2.functions.x1_MakePool10000(group_id))
         await send(utility_module_cfg2.functions.x2_Liquidity(group_id))
-        await send(utility_module_cfg2.functions.step1_MakeWhitelist(group_id))
 
     async def create_if_needed_bulk(group_id: int):
         tg = await utility_bulk_position_creator.functions.test_group(group_id).call()
@@ -130,6 +184,7 @@ async def test_position_for_liquidation():
     """
 
     async def _make_positions(group_id: int):
+        await send(utility_module_cfg2.functions.step1_MakeWhitelist(group_id))
         await send(utility_module_cfg2.functions.step2_MakeSlowOrder(group_id))
         await send(utility_module_cfg2.functions.step3_SupplyOrder(group_id))
         await send(utility_module_cfg2.functions.step4_MakePosition(group_id))
@@ -140,11 +195,12 @@ async def test_position_for_liquidation():
         tg = await utility_module_cfg2.functions.test_group(group_id).call()
         logger.info(f"Test group {group_id} data: {tg}")
         position_id = tg[3]  # token0, token1, orderId, positionId, last_step
-        await asyncio.sleep(10)  # wait for the next block to ensure liquidation check
-        subject, liquidator, frozen_timestamp, liquidated = await margin_module.functions.subjectToLiquidationExtended(position_id).call()
+        await asyncio.sleep(15)  # wait for the next block to ensure liquidation check
+        call = margin_module.functions.subjectToLiquidationExtended(position_id).call()
+        subject, liquidator, frozen_timestamp, liquidated, predict_ts = await call
         logger.info(
             f"Position ID: {position_id} | Group ID: {group_id} | "
-            f"subjectToLiquidationExtended: {subject}"
+            f"subjectToLiquidationExtended: {subject} | predict_ts: {predict_ts}"
         )
         assert subject is True
         assert liquidator != ADDRESS_ZERO
@@ -178,20 +234,19 @@ async def test_position_not_liquidation_one_block():
     :return:
     """
     group_id = GROUPS_IDS[0]
-
+    await send(utility_module_cfg2.functions.step1_MakeWhitelist(group_id))
     await send(utility_module_cfg2.functions.step2_MakeSlowOrder(group_id))
     await send(utility_module_cfg2.functions.step3_SupplyOrder(group_id))
     await send(utility_module_cfg2.functions.step4_MakePosition(group_id))
-    await asyncio.gather(*[
-        send(utility_module_cfg2.functions.step5_MarginSwapAll(group_id)),
-        send(utility_module_cfg2.functions.step7_LiquidatingSwapWithPullback(group_id))
-    ])
+    await send(utility_module_cfg2.functions.step5_MarginSwapAll(group_id))
+    await send(utility_module_cfg2.functions.step7_LiquidatingSwapWithPullback(group_id))
+
     tg = await utility_module_cfg2.functions.test_group(group_id).call()
     position_id = tg[3]  # token0, token1, orderId, positionId, last_step
     logger.info(f"Position ID: {position_id} | Group ID: {group_id}... waiting for liquidation check")
     await asyncio.sleep(10)
     call = asyncio.create_task(margin_module.functions.subjectToLiquidationExtended(position_id).call())
-    subject, liquidator, frozen_timestamp, liquidated = await call
+    subject, liquidator, frozen_timestamp, liquidated, predict_ts = await call
 
     assert subject is False
     assert liquidator == ADDRESS_ZERO

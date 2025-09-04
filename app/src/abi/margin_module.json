@@ -38,6 +38,25 @@
     "anonymous": false,
     "inputs": [
       {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "positionId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "leverage",
+        "type": "uint256"
+      }
+    ],
+    "name": "InitialLeverage",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
         "indexed": true,
         "internalType": "uint256",
         "name": "positionId",
@@ -735,25 +754,6 @@
         "type": "uint256"
       }
     ],
-    "name": "getOrderCollateralAssets",
-    "outputs": [
-      {
-        "internalType": "address[]",
-        "name": "",
-        "type": "address[]"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "id",
-        "type": "uint256"
-      }
-    ],
     "name": "getOrderExpirationData",
     "outputs": [
       {
@@ -770,19 +770,6 @@
         "internalType": "uint32",
         "name": "",
         "type": "uint32"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "getOrdersLength",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
       }
     ],
     "stateMutability": "view",
@@ -888,19 +875,6 @@
         "internalType": "bytes32",
         "name": "_whitelistId",
         "type": "bytes32"
-      }
-    ],
-    "stateMutability": "view",
-    "type": "function"
-  },
-  {
-    "inputs": [],
-    "name": "getPositionsLength",
-    "outputs": [
-      {
-        "internalType": "uint256",
-        "name": "",
-        "type": "uint256"
       }
     ],
     "stateMutability": "view",
@@ -1611,6 +1585,11 @@
         "internalType": "bool",
         "name": "liquidated",
         "type": "bool"
+      },
+      {
+        "internalType": "uint256",
+        "name": "insolvensy_expected_time",
+        "type": "uint256"
       }
     ],
     "stateMutability": "view",

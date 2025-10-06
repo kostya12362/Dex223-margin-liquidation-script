@@ -1,7 +1,7 @@
 [tool.poetry]
-name = "Crawler auto.ria"
+name = "Crawler for Margin Liquidation"
 version = "0.1.0"
-description = "Extract data from website and save to database"
+description = "Check positions on Dex223 and liquidate if necessary"
 authors = ["kostya12362 <rota199804@gmail.com>"]
 packages = [{include = "*", from="src"}]
 

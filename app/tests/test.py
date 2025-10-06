@@ -59,7 +59,7 @@ margin_module = w3.eth.contract(
 
 fake = Faker()
 # GROUPS_IDS = [1, 2, 3, 15]  # Groups to be created or used in tests
-INDEX = 1
+INDEX = 8
 GROUPS_IDS = [1003 + INDEX, 1004 + INDEX][0:1]  # Use only one group for tests to avoid concurrency issues
 BULK_GROUPS_IDS = [1051 + INDEX]
 
@@ -301,43 +301,71 @@ async def test_make_position_liquid_on_next_block_illiquid():
     )
 
 
-# @pytest.mark.asyncio
-# async def test_parallel_creation():
-#     """
+def interest_rate_for_minutes(
+    minutes: int,
+    loan_amount: int = 50 * 10**18,      # как в UtilityModuleCfg2.step4_MakePosition
+    collateral_value_in_base: int = (25 * 10**18) // 4  # 1:4 по PureOracle при равных decimals
+) -> int:
+    """
+    Возвращает interestRate (за 30 дней, precision 1e4), чтобы позиция
+    стала неплатёжеспособной примерно через `minutes` минут из-за процентов.
+    Формула из контракта: required = L + (L * r * t / 30d) / 1e4,
+    ликвидация когда required > L + C  =>  r > C * 30d * 1e4 / (L * t)
+    """
+    t = minutes * 60
+    THIRTY_DAYS = 30 * 24 * 60 * 60
+    # небольшой запас 5% вверх, чтобы гарантировать попадание в окно
+    raw = math.ceil(collateral_value_in_base * THIRTY_DAYS * 10000 / (loan_amount * t))
+    return math.ceil(raw * 1.05)
 
-# @pytest.mark.asyncio
-# async def test_liquidity_flip():
-#     # 3. Переход в два блока: ликвидна -> не ликвидна
-#     await send(util2.functions.step7_LiquidatingSwapViaPool(0))
-#     await send(util2.functions.step8_FreezeForLiquidation(0))
-#
-#     # Имитируем новый блок
-#     await w3.provider.make_request('evm_mine', [])
-#
-#     await send(util2.functions.step7_OneForZeroSwapViaPool(0))
-#     tg = await util2.functions.test_group(0).call()
-#     pos = tg[2]
-#     is_liq = await margin.functions.subjectToLiquidation(pos).call()
-#     assert not is_liq
-#
-#
-# @pytest.mark.asyncio
-# async def test_multiple_new_asset_events():
-#     # 4. Bulk swap - несколько NewAsset в одном блоке
-#     receipt = await send(util2.functions.step5_MarginSwapAll(0))
-#     events = margin.events.NewAsset().process_receipt(receipt)
-#     assert len(events) > 1
-#
-#
-# @pytest.mark.asyncio
-# async def test_double_swap_sequence():
-#     # 5.1 Сценарий: swap делает ликвидной, затем 1-for-0 возвращает в прибыль
-#     await send(util2.functions.step5_MarginSwapAll(0))
-#     await send(util2.functions.step7_OneForZeroSwapViaPool(0))
-#
-#     # 5.2 Сценарий: сначала ликвидизирующий swap, потом pullback+liquidation
-#     await send(util2.functions.step7_LiquidatingSwapViaPool(0))
-#     await send(util2.functions.step8_PullbackAndLiquidationAgain(0))
+@pytest.mark.asyncio
+async def test_interest_window_liquidation_prediction():
+    """
+    Создаёт ордер с кастомной ставкой так, чтобы позиция стала ликвидируемой
+    ЧЕРЕЗ 5–15 МИНУТ из-за процентов. Без свапов.
+    Проверяем это через predict_ts из subjectToLiquidationExtended.
+    """
+    group_id = GROUPS_IDS[0]
+
+    # Целимся примерно в 10 минут середины окна
+    target_minutes = 1
+    ir = interest_rate_for_minutes(target_minutes)
+
+    # Шаги: whitelist -> custom order -> supply -> open position
+    await send(utility_module_cfg2.functions.step1_MakeWhitelist(group_id))
+    await send(utility_module_cfg2.functions.step2_MakeCustomOrder(group_id, ir))
+    await send(utility_module_cfg2.functions.step3_SupplyOrder(group_id))
+    await send(utility_module_cfg2.functions.step4_MakePosition(group_id))
+
+    # Берём positionId из test_group storage
+    tg = await utility_module_cfg2.functions.test_group(group_id).call()
+    position_id = tg[3]
+
+    # Получаем текущее время по блоку, а не по локальным часам
+    latest_block = await w3.eth.get_block("latest")
+    now_ts = int(latest_block["timestamp"])
+
+    # Вызываем subjectToLiquidationExtended: ожидаем, что сейчас ещё НЕ ликвидируемо,
+    # и predict_ts лежит в окне 5–15 минут от now_ts.
+    subject, liquidator, frozen_timestamp, liquidated, predict_ts = await margin_module.functions.subjectToLiquidationExtended(position_id).call()
+
+    logger.info(f"[interest-window] IR={ir} | position={position_id} | "
+                f"subject={subject} | predict_ts={predict_ts} | now={now_ts}")
+
+    # Позиция не должна быть сразу ликвидируема
+    assert subject is False
+    assert liquidated is False
+    assert liquidator == ADDRESS_ZERO
+    assert frozen_timestamp == 0
+
+    # Допускаем ±60 секунд дрейфа блока
+    lower = now_ts + 5 * 60 - 60
+    upper = now_ts + 15 * 60 + 60
+    assert lower <= predict_ts <= upper, (
+        f"Ожидали predict_ts в окне 5–15 минут. now={now_ts}, predict_ts={predict_ts}, "
+        f"окно=[{lower}, {upper}], IR={ir}"
+    )
+
 
 
 if __name__ == "__main__":
